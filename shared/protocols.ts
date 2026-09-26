@@ -68,6 +68,13 @@ const xrayDomain: Field = {
   placeholder: 'hk.example.com', help: '证书由主菜单 10. SSL 证书管理签发，存放在 /etc/nginx/ssl/<域名>/',
 }
 const password: Field = { key: 'password', label: '密码', type: 'password', placeholder: '留空自动生成' }
+// VLESS Encryption (post-quantum; psm node … --vless-enc). sing-box's VLESS has
+// none, so such a node is left out of the sing-box subscription.
+const VENC_HELP = '客户端需要 Xray v25.9+ 或 mihomo 1.19.13+；sing-box、Surge、Quantumult X、Loon 用不了开启后的节点（sing-box 订阅里不会出现它）。X25519 链接短；ML-KEM-768 全程抗量子，但链接约 1.6 KB。'
+const vlessEnc = (engines?: Engine[]): Field => ({
+  key: 'vless_enc', label: 'VLESS Encryption（后量子加密）', type: 'select', default: '', engines, help: VENC_HELP,
+  options: [{ value: '', label: '不开启' }, { value: 'x25519', label: 'X25519' }, { value: 'mlkem768', label: 'ML-KEM-768' }],
+})
 const uuid: Field = { key: 'uuid', label: 'UUID', type: 'text', placeholder: '留空自动生成' }
 
 const ALL_CORES: Engine[] = ['xray', 'sing-box', 'mihomo']
@@ -113,6 +120,12 @@ export const PROTOCOLS: Protocol[] = [
         { key: 'obfs_type', label: '混淆类型', type: 'select', default: 'salamander', options: [
           { value: 'salamander', label: 'Salamander' }, { value: 'gecko', label: 'Gecko' }] },
         { key: 'hop_ports', label: '端口跳跃范围', type: 'text', placeholder: '20000-20999（留空不开启）', pattern: '^$|^\\d{1,5}-\\d{1,5}$' },
+        // Xray has it from v26.4.13, but the panel installs Xray's stable release (v26.3.27)
+        { key: 'bbr_profile', label: 'BBR 拥塞配置档', type: 'select', default: '', engines: SB_MH, options: [
+          { value: '', label: '默认（standard）' },
+          { value: 'conservative', label: 'conservative：温和，带宽多人共享或线路拥堵时' },
+          { value: 'aggressive', label: 'aggressive：激进，丢包较高的跨境线路' }],
+          help: '服务器向客户端发数据时 BBR 的激进程度（不限速时生效）。需要 sing-box 1.14+ 或 mihomo 1.19.24+，服务器上的内核太旧时节点会创建失败并说明原因。' },
       ],
     }],
   },
@@ -125,10 +138,10 @@ export const PROTOCOLS: Protocol[] = [
           { key: 'server_name', label: '伪装域名（SNI）', type: 'text', required: true, placeholder: 'learn.microsoft.com',
             help: '选支持 TLS 1.3、不在 CDN 后面的真实网站' },
           { key: 'dest', label: '伪装目标', type: 'text', required: true, placeholder: 'learn.microsoft.com:443', pattern: '^[^\\s:]+:\\d{1,5}$' },
-          uuid,
+          uuid, vlessEnc(['xray']),
         ],
       },
-      { id: 'vless-vision', label: 'Vision（TCP + TLS）', psm: 'vision', engines: ['xray'], defaultEngine: 'xray', fields: [xrayDomain, uuid] },
+      { id: 'vless-vision', label: 'Vision（TCP + TLS）', psm: 'vision', engines: ['xray'], defaultEngine: 'xray', fields: [xrayDomain, uuid, vlessEnc()] },
       {
         id: 'vless-xhttp', label: 'XHTTP', psm: 'xhttp', engines: ['xray'], defaultEngine: 'xray',
         fields: [
@@ -142,6 +155,10 @@ export const PROTOCOLS: Protocol[] = [
             options: [{ value: 'xhttp', label: 'XHTTP' }, { value: 'grpc', label: 'gRPC' }] },
           { key: 'kcp_seed', label: 'mKCP 混淆种子', type: 'text', when: { mode: ['mkcp'] }, placeholder: '留空自动生成' },
           uuid,
+          { ...vlessEnc(), when: { mode: ['xhttp', 'ws', 'grpc', 'httpupgrade', 'h2', 'reality-layer'] } },
+          { key: 'vless_enc', label: 'VLESS Encryption（后量子加密）', type: 'select', default: '', when: { mode: ['mkcp'] },
+            help: 'mKCP 不套 TLS，而 Xray v26.7.7 起的客户端拒绝向公网地址发送未加密的 VLESS，所以默认开启（X25519）。选「不开启」只有旧版客户端能连。',
+            options: [{ value: '', label: 'X25519（默认）' }, { value: 'mlkem768', label: 'ML-KEM-768' }, { value: 'none', label: '不开启（仅旧版客户端）' }] },
         ],
       },
       {
@@ -152,7 +169,7 @@ export const PROTOCOLS: Protocol[] = [
             { value: 'tcp', label: 'TCP' }, { value: 'ws', label: 'WebSocket' }, { value: 'grpc', label: 'gRPC' },
             { value: 'httpupgrade', label: 'HTTPUpgrade（sing-box）' }, { value: 'xhttp', label: 'XHTTP（mihomo）' }] },
           { key: 'path', label: '路径', type: 'text', when: { transport: ['ws', 'httpupgrade', 'xhttp'] }, placeholder: '留空自动生成' },
-          uuid,
+          uuid, vlessEnc(['mihomo']),
         ],
       },
     ],

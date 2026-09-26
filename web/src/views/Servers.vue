@@ -77,6 +77,20 @@ async function upgradeAgent(s: Server) {
     error.value = e instanceof ApiError ? e.message : String(e)
   }
 }
+// PSM itself, when the agent is current: the same task — PSM is updated first,
+// and psm-agent stays as it is. The panel asks for the nodes' links again once
+// the server reports the new version (at its next version check, within the
+// hour, or right away when 诊断 is run).
+async function updatePsm(s: Server) {
+  if (!confirm(`把 ${s.name} 上的 PSM 更新到最新版？\n\n节点和中转不受影响。更新后面板会重新取一次节点的链接和订阅（服务器下次报告版本时，最多一小时；点「诊断」立即生效）。`)) return
+  error.value = ''
+  try {
+    await api(`/api/servers/${s.id}/upgrade-agent`, { method: 'POST' })
+    notice.value = `已通知 ${s.name} 更新 PSM，完成后 PSM 列会显示新版本。`
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : String(e)
+  }
+}
 // while a server is leaving, look again every few seconds
 let leavingPoll: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
@@ -141,6 +155,7 @@ const statusText = { online: '在线', pending: '待接入', offline: '离线', 
             <button class="btn small ghost" :disabled="s.status === 'pending'" :data-test="`diagnose-${s.name}`" @click="diagnose(s)">诊断</button>
             <button class="btn small ghost" @click="newCommand(s)">安装命令</button>
             <button v-if="outdated(s)" class="btn small ghost" :data-test="`upgrade-agent-${s.name}`" @click="upgradeAgent(s)">升级 agent</button>
+            <button v-else-if="s.status === 'online'" class="btn small ghost" :data-test="`update-psm-${s.name}`" @click="updatePsm(s)">更新 PSM</button>
             <button class="btn small ghost danger" :data-test="`remove-${s.name}`" @click="remove(s)">{{ s.status === 'leaving' ? '只从面板移除' : '移除' }}</button>
           </td>
         </tr>

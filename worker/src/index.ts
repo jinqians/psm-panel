@@ -16,7 +16,7 @@ import { activeFields, findVariant, trafficTag, validateNode, type NodeInput } f
 // not exported: every export of a Worker's main module is taken for an entrypoint
 // Shown in 系统设置 as 面板版本; bump it whenever the panel gains something, so
 // that it answers "did my deploy take effect?" — the only marker a user has.
-const PANEL_VERSION = '0.6.0'
+const PANEL_VERSION = '0.7.0'
 
 // The psm-agent release this panel expects its servers to run: the 服务器 page
 // offers an upgrade to every joined server reporting anything else. Bump it
@@ -177,6 +177,22 @@ async function queueApply(env: Env, n: NodeRow, data: Record<string, unknown>, k
   await enqueue(env, n.server_id, n.id, trafficTask(n))
 }
 
+/**
+ * Ask a server for its nodes' client exports again (share link, sing-box
+ * outbound, mihomo proxy). A PSM update can change them without the node
+ * changing — a certificate pin in the links, a node newly written as a mihomo
+ * proxy — and the panel only stores what the agent sent at the node's last add
+ * or edit. Standalone servers export the same as before.
+ */
+async function queueExports(env: Env, serverId: number) {
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM nodes WHERE server_id = ? AND status = 'applied' AND engine != 'standalone'`).bind(serverId).all<NodeRow>()
+  for (const n of results) {
+    await enqueue(env, serverId, n.id,
+      { kind: 'node.export', core: n.engine, protocol: n.psm_protocol, tag: n.name, server: n.address, format: linkFormat(n) })
+  }
+}
+
 function trafficTask(n: NodeRow) {
   return { kind: 'traffic.set', tag: trafficTag(n), limit_bytes: Math.round((n.traffic_limit_gb || 0) * GB), reset_day: n.reset_day || 1 }
 }
@@ -310,7 +326,8 @@ app.post('/api/servers/:id/upgrade-agent', async (c) => {
   if (!s) return c.json(fail('not_found', 'no such server'), 404)
   if (!s.agent_token_hash) return c.json(fail('not_joined', 'the server has not joined yet'), 409)
   await enqueue(c.env, s.id, null, { kind: 'agent.update' })
-  await audit(c.env, 'server.upgrade-agent', s.name, `${s.agent_version ?? '未知'} → ${AGENT_VERSION}`)
+  await audit(c.env, 'server.upgrade-agent', s.name, s.agent_version === AGENT_VERSION
+    ? `更新 PSM（psm-agent 已是 ${AGENT_VERSION}）` : `${s.agent_version ?? '未知'} → ${AGENT_VERSION}`)
   return c.json({ status: 'queued' }, 202)
 })
 
@@ -1074,8 +1091,14 @@ async function applyResult(env: Env, server: ServerRow, t: TaskRow, r: AgentResu
     case 'node.update':
       if (!t.node_id) return
       // a failed update leaves the node running as before (PSM rolls back)
-      await db.prepare(`UPDATE nodes SET status = 'applied', last_error = ?, link_enc = COALESCE(?, link_enc), outbound_enc = COALESCE(?, outbound_enc), clash_enc = COALESCE(?, clash_enc) WHERE id = ?`)
-        .bind(error ? `修改没有生效：${error}` : null, link, outbound, clash, t.node_id).run()
+      if (!r.ok) {
+        await db.prepare(`UPDATE nodes SET status = 'applied', last_error = ? WHERE id = ?`).bind(`修改没有生效：${error}`, t.node_id).run()
+        return
+      }
+      // a sing-box outbound or mihomo proxy the node no longer has goes (turning
+      // VLESS Encryption on takes it out of sing-box): kept, it would be a dead node
+      await db.prepare(`UPDATE nodes SET status = 'applied', last_error = NULL, link_enc = COALESCE(?, link_enc), outbound_enc = ?, clash_enc = ? WHERE id = ?`)
+        .bind(link, outbound, clash, t.node_id).run()
       return
     case 'node.delete': case 'standalone.remove':
       if (!t.node_id) return
@@ -1099,8 +1122,9 @@ async function applyResult(env: Env, server: ServerRow, t: TaskRow, r: AgentResu
       else await db.prepare(`UPDATE relays SET status = 'applied', last_error = ? WHERE id = ?`).bind(error, t.relay_id).run()
       return
     case 'node.export':
-      if (t.node_id && (link || outbound || clash)) {
-        await db.prepare('UPDATE nodes SET link_enc = COALESCE(?, link_enc), outbound_enc = COALESCE(?, outbound_enc) WHERE id = ?')
+      // as for an update: what the node exports now, nothing it no longer has
+      if (t.node_id && r.ok && link) {
+        await db.prepare('UPDATE nodes SET link_enc = ?, outbound_enc = ?, clash_enc = ? WHERE id = ?')
           .bind(link, outbound, clash, t.node_id).run()
       }
       return
@@ -1177,6 +1201,7 @@ app.post('/api/agent/sync', async (c) => {
   if (!server) return c.json(fail('unauthorized', 'unknown agent token'), 401)
   type SyncBody = { hostname?: string; agent_version?: string; psm_version?: string; results?: AgentResult[]; traffic?: TrafficEntry[]; relays?: { items?: RelaySample[] } | RelaySample[] }
   const body = await c.req.json<SyncBody>().catch((): SyncBody => ({}))
+  const psmBefore = server.psm_version
   await c.env.DB.prepare(`UPDATE servers SET last_seen = datetime('now'), hostname = COALESCE(?, hostname),
       agent_version = COALESCE(?, agent_version), psm_version = COALESCE(?, psm_version) WHERE id = ?`)
     .bind(body.hostname?.slice(0, 64) ?? null, body.agent_version?.slice(0, 16) ?? null,
@@ -1197,6 +1222,11 @@ app.post('/api/agent/sync', async (c) => {
     await applyResult(c.env, server, t, r)
   }
   if (Array.isArray(body.traffic)) await applyTraffic(c.env, server, body.traffic)
+  // PSM on the server changed (updated by hand, or by 更新 PSM / 升级 agent):
+  // its nodes' exports may have changed with it (a status result above reads
+  // the version afresh, so compare after the results)
+  const psmNow = (await c.env.DB.prepare('SELECT psm_version FROM servers WHERE id = ?').bind(server.id).first<{ psm_version: string | null }>())?.psm_version
+  if (psmBefore && psmNow && psmNow !== psmBefore) await queueExports(c.env, server.id)
   // `psm relay probe --json` wraps its rows in {api_version, count, items}
   const samples = Array.isArray(body.relays) ? body.relays : body.relays?.items
   if (Array.isArray(samples)) await applyRelaySamples(c.env, server, samples)

@@ -5,7 +5,7 @@
 // become "<server>-<node>" so nodes of the same name on different servers
 // stay apart.
 
-import { BUILTIN_TEMPLATES, renderTemplate, TEMPLATE_FORMATS, type TemplateFormat } from './templates'
+import { BUILTIN_TEMPLATES, linkProxy, renderTemplate, TEMPLATE_FORMATS, type TemplateFormat } from './templates'
 
 export type SubNode = {
   server: string
@@ -16,8 +16,14 @@ export type SubNode = {
   clash?: Record<string, unknown> | null
 }
 
-export type Format = 'uri' | TemplateFormat
-export const FORMATS: Format[] = ['uri', ...TEMPLATE_FORMATS]
+/**
+ * provider: the nodes as mihomo proxies (YAML), for a Clash profile's
+ * proxy-provider ({{provider_url}}). Share links would lose what mihomo's link
+ * importer does not read — a self-signed VMess or TUIC node's certificate, an
+ * HTTPUpgrade transport — so the provider serves PSM's own mihomo proxies.
+ */
+export type Format = 'uri' | 'provider' | TemplateFormat
+export const FORMATS: Format[] = ['uri', 'provider', ...TEMPLATE_FORMATS]
 
 /** ?format= first, then the client's User-Agent; share links by default. */
 export function pickFormat(query: string | null | undefined, userAgent: string): Format {
@@ -81,6 +87,19 @@ const CONTENT: Record<TemplateFormat, { type: string; ext: string }> = {
 }
 
 /**
+ * The provider body: every node that has a mihomo proxy (PSM's export, or one
+ * read from its share link), as YAML flow mappings — JSON is valid YAML.
+ */
+export function providerYaml(nodes: SubNode[]): string {
+  const lines: string[] = []
+  for (const n of nodes) {
+    const p = n.clash && typeof n.clash === 'object' ? n.clash : linkProxy(n.link)
+    if (p) lines.push(`  - ${JSON.stringify({ ...p, name: displayName(n) })}`)
+  }
+  return `proxies:\n${lines.join('\n')}\n`
+}
+
+/**
  * The subscription body and its content type. selfUrl: this subscription's
  * URL; template: the body of the subscription's own template for this format
  * (the built-in one when absent).
@@ -88,6 +107,7 @@ const CONTENT: Record<TemplateFormat, { type: string; ext: string }> = {
 export function buildSubscription(format: Format, nodes: SubNode[], selfUrl: string,
   opts: { name?: string; template?: string | null } = {}): { body: string; type: string; ext: string } {
   if (format === 'uri') return { body: b64(uriList(nodes).join('\n')), type: 'text/plain; charset=utf-8', ext: 'txt' }
+  if (format === 'provider') return { body: providerYaml(nodes), type: 'text/yaml; charset=utf-8', ext: 'yaml' }
   const body = renderTemplate(format, opts.template ?? BUILTIN_TEMPLATES[format].body,
     { name: opts.name ?? 'PSM', selfUrl, nodes, displayName, surgeLineOf })
   return { body, ...CONTENT[format] }

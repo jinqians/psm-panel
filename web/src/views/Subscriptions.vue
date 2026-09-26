@@ -14,7 +14,7 @@ const formats = [
   { id: '', label: '通用（自动识别）', help: 'v2rayN、Shadowrocket、Hiddify、NekoBox 等；下面几种客户端用这个地址也会自动拿到各自的格式' },
   { id: 'clash', label: 'Clash / mihomo', help: 'Clash Verge、Mihomo Party、ClashX Meta' },
   { id: 'stash', label: 'Stash', help: 'Stash（iOS / macOS）' },
-  { id: 'singbox', label: 'sing-box', help: 'sing-box 官方客户端（SFA / SFI / SFM），1.12 及以上' },
+  { id: 'singbox', label: 'sing-box', help: 'sing-box 官方客户端（SFA / SFI / SFM），1.14 及以上' },
   { id: 'surge', label: 'Surge', help: 'Surge（iOS / macOS）；没有 VLESS' },
   { id: 'quanx', label: 'Quantumult X', help: 'Quantumult X；没有 Hysteria2、TUIC、Snell' },
   { id: 'loon', label: 'Loon', help: 'Loon；没有 TUIC、Snell' },

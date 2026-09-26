@@ -23,6 +23,9 @@ type Proxy = Record<string, any>
 const str = (v: unknown) => (v === undefined || v === null ? '' : String(v))
 const q = (v: unknown) => `"${str(v).replace(/"/g, '')}"`   // Loon quotes passwords; a quote cannot be escaped there
 const insecure = (p: Proxy) => p['skip-cert-verify'] === true
+// A self-signed node's certificate SHA-256 (PSM's export: fingerprint). Where a
+// client can pin it, it is pinned and verified instead of trusted blindly.
+const pin = (p: Proxy) => (typeof p.fingerprint === 'string' && /^[0-9a-f]{64}$/i.test(p.fingerprint) ? p.fingerprint.toLowerCase() : '')
 const tlsName = (p: Proxy) => str(p.servername || p.sni || p.server)
 const wsHost = (p: Proxy) => str(p['ws-opts']?.headers?.Host || tlsName(p))
 const wsPath = (p: Proxy) => str(p['ws-opts']?.path || '/')
@@ -33,7 +36,9 @@ const shadowTls = (p: Proxy) => (p.plugin === 'shadow-tls' ? p['plugin-opts'] ??
 // manual.nssurge.com/policies: ss, vmess, trojan, hysteria2, tuic-v5, anytls,
 // snell, socks5. No VLESS, no WireGuard server of ours.
 export function surgeLine(name: string, p: Proxy): string | null {
-  const tls = `, sni=${tlsName(p)}, skip-cert-verify=${insecure(p)}`
+  const tls = pin(p)
+    ? `, sni=${tlsName(p)}, skip-cert-verify=false, server-cert-fingerprint-sha256=${pin(p)}`
+    : `, sni=${tlsName(p)}, skip-cert-verify=${insecure(p)}`
   switch (p.type) {
     case 'ss': {
       const st = shadowTls(p)
@@ -65,7 +70,7 @@ export function surgeLine(name: string, p: Proxy): string | null {
 // crossutility/Quantumult-X sample.conf: shadowsocks, vmess, vless, trojan,
 // anytls, socks5. No Hysteria2, TUIC or Snell.
 export function quanxLine(name: string, p: Proxy): string | null {
-  const verify = `tls-verification=${!insecure(p)}`
+  const verify = pin(p) ? `tls-verification=true, tls-cert-sha256=${pin(p)}` : `tls-verification=${!insecure(p)}`
   const reality = (x: Proxy) => x['reality-opts']
     ? `, reality-base64-pubkey=${str(x['reality-opts']['public-key'])}, reality-hex-shortid=${str(x['reality-opts']['short-id'])}` : ''
   switch (p.type) {
@@ -100,7 +105,9 @@ export function quanxLine(name: string, p: Proxy): string | null {
 // nsloon.app/docs/Node: Shadowsocks, vmess, VLESS, trojan, Hysteria2, AnyTLS,
 // socks5. No TUIC or Snell.
 export function loonLine(name: string, p: Proxy): string | null {
-  const tls = `,sni=${tlsName(p)},skip-cert-verify=${insecure(p)}`
+  const tls = pin(p)
+    ? `,sni=${tlsName(p)},skip-cert-verify=false,tls-cert-sha256=${pin(p)}`
+    : `,sni=${tlsName(p)},skip-cert-verify=${insecure(p)}`
   switch (p.type) {
     case 'ss': {
       const st = shadowTls(p)
@@ -136,8 +143,8 @@ export function loonLine(name: string, p: Proxy): string | null {
 }
 
 // Nodes exported without a mihomo proxy (the standalone ss-rust, or a node an
-// older psm-agent exported): their share link is read instead, for the two
-// kinds that are simple enough to carry everything — ss:// and VLESS REALITY.
+// older PSM exported, such as Xray's XHTTP ones): their share link is read
+// instead, for the kinds that carry everything — ss:// and vless://.
 function unb64url(s: string): string {
   const std = s.replace(/-/g, '+').replace(/_/g, '/')
   return new TextDecoder().decode(Uint8Array.from(atob(std + '='.repeat((4 - (std.length % 4)) % 4)), (c) => c.charCodeAt(0)))
@@ -164,20 +171,32 @@ export function linkProxy(link: string | null): Proxy | null {
         servername: q.get('sni') ?? '', 'client-fingerprint': q.get('fp') || 'chrome',
         ...(q.get('flow') ? { flow: q.get('flow') } : {}), ...(enc && enc !== 'none' ? { encryption: enc } : {}),
       }
-      if (q.get('security') === 'reality' && net === 'tcp') {
-        return { ...base, network: 'tcp', 'reality-opts': { 'public-key': q.get('pbk') ?? '', 'short-id': q.get('sid') ?? '' } }
+      const path = q.get('path') || '/', svc = q.get('serviceName') ?? ''
+      if (q.get('security') === 'reality') {
+        const r = { 'reality-opts': { 'public-key': q.get('pbk') ?? '', 'short-id': q.get('sid') ?? '' } }
+        if (net === 'tcp') return { ...base, ...r, network: 'tcp' }
+        if (net === 'grpc') return { ...base, ...r, network: 'grpc', 'grpc-opts': { 'grpc-service-name': svc } }
+        if (net === 'xhttp') return { ...base, ...r, network: 'xhttp', 'xhttp-opts': { path, mode: q.get('mode') || 'auto' } }
+        return null
+      }
+      if (q.get('security') !== 'tls') return null
+      const host = q.get('host') || q.get('sni') || server
+      // a self-signed certificate: skipped as the link says, and pinned (pcs)
+      const cert: Proxy = {
+        ...(['1', 'true'].includes(q.get('allowInsecure') ?? q.get('insecure') ?? '') ? { 'skip-cert-verify': true } : {}),
+        ...(/^[0-9a-f]{64}$/i.test(q.get('pcs') ?? '') ? { fingerprint: q.get('pcs')!.toLowerCase() } : {}),
       }
       // HTTPUpgrade: mihomo reads "type=httpupgrade" as a network its VLESS
       // client does not have, so such a link never upgrades. It is mihomo's
       // ws with v2ray-http-upgrade instead (PSM's own mihomo export agrees).
-      if (q.get('security') === 'tls' && net === 'httpupgrade') {
-        const host = q.get('host') || q.get('sni') || server
-        return {
-          ...base, network: 'ws',
-          'skip-cert-verify': ['1', 'true'].includes(q.get('allowInsecure') ?? q.get('insecure') ?? ''),
-          'ws-opts': { path: q.get('path') || '/', headers: { Host: host }, 'v2ray-http-upgrade': true },
-        }
+      if (net === 'httpupgrade') return { ...base, ...cert, network: 'ws', 'ws-opts': { path, headers: { Host: host }, 'v2ray-http-upgrade': true } }
+      if (net === 'ws') return { ...base, ...cert, network: 'ws', 'ws-opts': { path, headers: { Host: host } } }
+      if (net === 'grpc') return { ...base, ...cert, network: 'grpc', 'grpc-opts': { 'grpc-service-name': svc } }
+      if (net === 'xhttp') return {
+        ...base, ...cert, network: 'xhttp', ...(q.get('alpn') ? { alpn: q.get('alpn')!.split(',') } : {}),
+        'xhttp-opts': { path, host, mode: q.get('mode') || 'auto' },
       }
+      if (net === 'tcp') return { ...base, ...cert, network: 'tcp' }
       return null
     }
   } catch {
@@ -186,8 +205,15 @@ export function linkProxy(link: string | null): Proxy | null {
   return null
 }
 
-// Stash: Clash's format; no AnyTLS, no XHTTP.
+// Stash: Clash's format; no AnyTLS, no XHTTP. It pins a certificate with
+// server-cert-fingerprint (stash.wiki: skip-cert-verify is not needed then).
 const stashOk = (p: Proxy) => p.type !== 'anytls' && p.network !== 'xhttp'
+function stashProxy(p: Proxy): Proxy {
+  if (!pin(p)) return p
+  const out: Proxy = { ...p, 'skip-cert-verify': false, 'server-cert-fingerprint': pin(p) }
+  delete out.fingerprint
+  return out
+}
 
 // ── rendering ────────────────────────────────────────────────────────────────
 export type RenderInput = {
@@ -209,7 +235,7 @@ function entries(format: TemplateFormat, r: RenderInput): Entry[] {
     let line: string | null = null
     switch (format) {
       case 'clash': line = p ? `- ${JSON.stringify(p)}` : null; break
-      case 'stash': line = p && stashOk(p) ? `- ${JSON.stringify(p)}` : null; break
+      case 'stash': line = p && stashOk(p) ? `- ${JSON.stringify(stashProxy(p))}` : null; break
       case 'singbox': line = n.outbound ? JSON.stringify({ ...n.outbound, tag: name }) : null; break
       case 'surge': line = (p && surgeLine(name, p)) || r.surgeLineOf(n); break
       case 'quanx': line = p ? quanxLine(name, p) : null; break
@@ -229,8 +255,9 @@ function entries(format: TemplateFormat, r: RenderInput): Entry[] {
  *                 to put in a group before its fixed members
  * - {{names_list}} the same names, joined by ", " with nothing after the last
  *                 (for a group of the nodes alone, such as url-test)
- * - {{provider_url}}, {{provider_exclude}} (Clash): this subscription's share
- *                 links, and a filter leaving out the nodes written out above
+ * - {{provider_url}}, {{provider_exclude}} (Clash): this subscription's nodes
+ *                 as mihomo proxies (format=provider), and a filter leaving out
+ *                 the nodes written out above
  * - {{sub_url}}   this subscription in this format; {{name}} its name
  */
 export function renderTemplate(format: TemplateFormat, body: string, r: RenderInput): string {
@@ -249,7 +276,7 @@ export function renderTemplate(format: TemplateFormat, body: string, r: RenderIn
       list.map((e) => indent + e.line + (format === 'singbox' ? ',' : '')).join('\n'))
     .replace(/\{\{names_list\}\}/g, () => each.join(', '))
     .replace(/\{\{names\}\}/g, () => names)
-    .replace(/\{\{provider_url\}\}/g, () => JSON.stringify(`${r.selfUrl}${join}format=uri`))
+    .replace(/\{\{provider_url\}\}/g, () => JSON.stringify(`${r.selfUrl}${join}format=provider`))
     .replace(/\{\{provider_exclude\}\}/g, () => `'${exclude.replace(/'/g, "''")}'`)
     .replace(/\{\{sub_url\}\}/g, () => `${r.selfUrl}${join}format=${format}`)
     .replace(/\{\{name\}\}/g, () => r.name.replace(/[\r\n]/g, ' '))
