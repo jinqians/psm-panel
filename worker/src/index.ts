@@ -11,7 +11,7 @@ import {
 } from './auth'
 import { buildSubscription, pickFormat, renameLink, type SubNode } from './subscription'
 import { BUILTIN_TEMPLATES, FORMAT_LABELS, TEMPLATE_FORMATS, type TemplateFormat } from './templates'
-import { activeFields, findVariant, trafficTag, validateNode, type NodeInput } from '../../shared/protocols'
+import { activeFields, currentVariant, findVariant, trafficTag, validateNode, type NodeInput } from '../../shared/protocols'
 import {
   bareHost, goodHost, goodPort, parseHostPort, RELAY_PORTS, relayProblems, type RelayEngine, type RelayFields, type RelayMode,
 } from '../../shared/relays'
@@ -21,7 +21,7 @@ import { linkVia, nodeVia, type Via } from './relayed'
 // not exported: every export of a Worker's main module is taken for an entrypoint
 // Shown in 系统设置 as 面板版本; bump it whenever the panel gains something, so
 // that it answers "did my deploy take effect?" — the only marker a user has.
-const PANEL_VERSION = '0.10.1'
+const PANEL_VERSION = '0.10.2'
 
 // The psm-agent release this panel expects its servers to run: the 服务器 page
 // offers an upgrade to every joined server reporting anything else. Bump it
@@ -284,6 +284,36 @@ function keptParams(variantFields: { key: string }[], incoming: Record<string, u
   return params
 }
 
+// VLESS nodes made before 0.10.2 get the variant they have now
+// (currentVariant in shared/protocols.ts): only the panel's record changes.
+// It reads their settings, so it runs after the key, once per database, and
+// is recorded among the migrations. A node whose settings do not decrypt
+// (written under another key) leaves it to be tried again.
+const VARIANTS_MIGRATION = 'data:0015_vless_variants'
+let variantsReady: Promise<void> | null = null
+async function migrateVariants(env: Env) {
+  if (await env.DB.prepare('SELECT 1 FROM psm_migrations WHERE name = ?').bind(VARIANTS_MIGRATION).first()) return
+  const { results } = await env.DB.prepare(
+    `SELECT id, protocol, variant, engine, params_enc FROM nodes WHERE protocol = 'vless' AND variant IN ('vless-tls', 'vless-xhttp')`)
+    .all<Pick<NodeRow, 'id' | 'protocol' | 'variant' | 'engine' | 'params_enc'>>()
+  const stmts: D1PreparedStatement[] = []
+  let unreadable = 0
+  for (const n of results) {
+    let params: Record<string, unknown>
+    try {
+      params = JSON.parse(await decrypt(env.TOKEN_KEY, n.params_enc)) as Record<string, unknown>
+    } catch {
+      unreadable++
+      continue
+    }
+    const v = currentVariant(n.protocol, n.variant, n.engine, params)
+    if (v !== n.variant) stmts.push(env.DB.prepare('UPDATE nodes SET variant = ? WHERE id = ?').bind(v, n.id))
+  }
+  if (!unreadable) stmts.push(env.DB.prepare('INSERT OR IGNORE INTO psm_migrations (name) VALUES (?)').bind(VARIANTS_MIGRATION))
+  else console.error(`vless variants: ${unreadable} node(s) not readable, left for the next start`)
+  if (stmts.length) await env.DB.batch(stmts)
+}
+
 // ── every request the Worker sees: the tables and the key ────────────────────
 // Where TOKEN_KEY came from: the secret, or the panel's own copy in D1 (a
 // one-click deploy); 系统设置 warns about the second.
@@ -293,6 +323,8 @@ app.use('*', async (c, next) => {
   await ensureSchema(c.env.DB)
   tokenKeySource ??= c.env.TOKEN_KEY ? 'secret' : 'panel'
   if (!c.env.TOKEN_KEY) c.env.TOKEN_KEY = panelKey ??= await storedTokenKey(c.env.DB)
+  variantsReady ??= migrateVariants(c.env).catch((e) => { variantsReady = null; throw e })
+  await variantsReady
   // after TOKEN_KEY: the session signature is derived from it
   await syncAdminPassword(c.env)
   await next()
@@ -934,11 +966,8 @@ async function planRelay(env: Env, b: RelayInput, old?: RelayRow): Promise<{ pla
 const nodeTarget = (n: NodeRow): RelayTarget => ({ host: n.address, port: n.public_port ?? n.port, server_id: n.server_id })
 
 /** The node speaks UDP alone: Hysteria2, TUIC, WireGuard, Xray's mKCP. */
-async function nodeOverUdp(env: Env, n: NodeRow): Promise<boolean> {
-  if (['hysteria2', 'tuic', 'wireguard'].includes(n.protocol)) return true
-  if (n.variant !== 'vless-xhttp') return false
-  const params = JSON.parse(await decrypt(env.TOKEN_KEY, n.params_enc)) as Record<string, unknown>
-  return params.mode === 'mkcp'
+async function nodeOverUdp(_env: Env, n: NodeRow): Promise<boolean> {
+  return ['hysteria2', 'tuic', 'wireguard'].includes(n.protocol) || n.variant === 'vless-mkcp'
 }
 
 /** Another relay rule on this server has the name: its own relays, and the tunnels it is the exit of. */

@@ -36,6 +36,12 @@ export interface Variant {
   label: string
   /** PSM's protocol name for `psm node add CORE <protocol>` */
   psm: string
+  /** where an engine knows it by another name (see psmOf) */
+  psmFor?: Partial<Record<Engine, string>>
+  /** node store fields an engine always gets for this variant, not asked in the form */
+  fixedFor?: Partial<Record<Engine, Record<string, unknown>>>
+  /** never on the shared 443, whatever its PSM protocol allows (mKCP is UDP) */
+  noMount443?: boolean
   engines: Engine[]
   defaultEngine: Engine
   fields: Field[]
@@ -147,35 +153,60 @@ export const PROTOCOLS: Protocol[] = [
           uuid, vlessEnc(['xray']),
         ],
       },
-      { id: 'vless-vision', label: 'Vision（TCP + TLS）', psm: 'vision', engines: ['xray'], defaultEngine: 'xray', fields: [xrayDomain, uuid, vlessEnc()] },
+      // One entry per kind of VLESS, whichever core runs it; what differs is
+      // PSM's name for it on each core (psmFor) and the fields each asks.
+      // Before 0.10.2 the entries followed the cores' names, so the same node
+      // could be made two ways; currentVariant() moves nodes made then.
+      //
+      // Vision is VLESS's xtls-rprx-vision flow, which all three cores have.
+      // PSM names it a protocol of its own on Xray only; on sing-box and mihomo
+      // it is their VLESS over TLS on TCP, which gets that flow by default
+      // (proxy-stack #11)
       {
-        id: 'vless-xhttp', label: 'XHTTP', psm: 'xhttp', engines: ['xray'], defaultEngine: 'xray',
+        id: 'vless-vision', label: 'Vision（TCP + TLS）', psm: 'vision', engines: ALL_CORES, defaultEngine: 'xray',
+        psmFor: { 'sing-box': 'vless', mihomo: 'vless' },
+        fixedFor: { 'sing-box': { transport: 'tcp' }, mihomo: { transport: 'tcp' } },
+        fields: [xrayDomain, ...cert(SB_MH), uuid, vlessEnc(['xray', 'mihomo'])],
+      },
+      // TLS with a transport other than TCP: Xray's XHTTP protocol (its mode),
+      // the VLESS of sing-box and mihomo (their transport), each with the
+      // transports it has
+      {
+        id: 'vless-tls', label: 'TLS + 传输（WS / gRPC / XHTTP…）', psm: 'vless', engines: ALL_CORES, defaultEngine: 'xray',
+        psmFor: { xray: 'xhttp' },
         fields: [
-          { key: 'mode', label: '传输模式', type: 'select', default: 'xhttp', options: [
-            { value: 'xhttp', label: 'XHTTP / SplitHTTP' }, { value: 'ws', label: 'WebSocket' }, { value: 'grpc', label: 'gRPC' },
-            { value: 'httpupgrade', label: 'HTTPUpgrade' }, { value: 'h2', label: 'HTTP/2' },
-            { value: 'reality-layer', label: 'REALITY 层（无需域名）' }, { value: 'mkcp', label: 'mKCP（UDP）' }] },
-          { ...xrayDomain, when: { mode: ['xhttp', 'ws', 'grpc', 'httpupgrade', 'h2'] } },
-          { key: 'server_name', label: '伪装域名', type: 'text', required: true, when: { mode: ['reality-layer'] }, placeholder: 'learn.microsoft.com' },
-          { key: 'reality_transport', label: 'REALITY 层传输', type: 'select', default: 'xhttp', when: { mode: ['reality-layer'] },
-            options: [{ value: 'xhttp', label: 'XHTTP' }, { value: 'grpc', label: 'gRPC' }] },
-          { key: 'kcp_seed', label: 'mKCP 混淆种子', type: 'text', when: { mode: ['mkcp'] }, placeholder: '留空自动生成' },
-          uuid,
-          { ...vlessEnc(), when: { mode: ['xhttp', 'ws', 'grpc', 'httpupgrade', 'h2', 'reality-layer'] } },
-          { key: 'vless_enc', label: 'VLESS Encryption（后量子加密）', type: 'select', default: '', when: { mode: ['mkcp'] },
-            help: 'mKCP 不套 TLS，而 Xray v26.7.7 起的客户端拒绝向公网地址发送未加密的 VLESS，所以默认开启（X25519）。选「不开启」只有旧版客户端能连。',
-            options: [{ value: '', label: 'X25519（默认）' }, { value: 'mlkem768', label: 'ML-KEM-768' }, { value: 'none', label: '不开启（仅旧版客户端）' }] },
+          xrayDomain, ...cert(SB_MH),
+          { key: 'mode', label: '传输方式', type: 'select', default: 'xhttp', engines: ['xray'], options: [
+            { value: 'xhttp', label: 'XHTTP' }, { value: 'ws', label: 'WebSocket' }, { value: 'grpc', label: 'gRPC' },
+            { value: 'httpupgrade', label: 'HTTPUpgrade' }, { value: 'h2', label: 'HTTP/2' }] },
+          { key: 'transport', label: '传输方式', type: 'select', default: 'ws', engines: ['sing-box'], options: [
+            { value: 'ws', label: 'WebSocket' }, { value: 'grpc', label: 'gRPC' }, { value: 'httpupgrade', label: 'HTTPUpgrade' }] },
+          { key: 'transport', label: '传输方式', type: 'select', default: 'ws', engines: ['mihomo'], options: [
+            { value: 'ws', label: 'WebSocket' }, { value: 'grpc', label: 'gRPC' }, { value: 'xhttp', label: 'XHTTP' }] },
+          { key: 'path', label: '路径', type: 'text', engines: SB_MH, when: { transport: ['ws', 'httpupgrade', 'xhttp'] }, placeholder: '留空自动生成' },
+          uuid, vlessEnc(['xray', 'mihomo']),
         ],
       },
       {
-        id: 'vless-tls', label: 'TLS', psm: 'vless', engines: SB_MH, defaultEngine: 'sing-box',
+        id: 'vless-reality-layer', label: 'REALITY + XHTTP / gRPC', psm: 'xhttp', engines: ['xray'], defaultEngine: 'xray',
+        fixedFor: { xray: { mode: 'reality-layer' } },
         fields: [
-          ...cert(SB_MH),
-          { key: 'transport', label: '传输方式', type: 'select', default: 'tcp', options: [
-            { value: 'tcp', label: 'TCP' }, { value: 'ws', label: 'WebSocket' }, { value: 'grpc', label: 'gRPC' },
-            { value: 'httpupgrade', label: 'HTTPUpgrade（sing-box）' }, { value: 'xhttp', label: 'XHTTP（mihomo）' }] },
-          { key: 'path', label: '路径', type: 'text', when: { transport: ['ws', 'httpupgrade', 'xhttp'] }, placeholder: '留空自动生成' },
-          uuid, vlessEnc(['mihomo']),
+          { key: 'server_name', label: '伪装域名（SNI）', type: 'text', required: true, placeholder: 'learn.microsoft.com',
+            help: '选支持 TLS 1.3、不在 CDN 后面的真实网站' },
+          { key: 'reality_transport', label: '传输方式', type: 'select', default: 'xhttp',
+            options: [{ value: 'xhttp', label: 'XHTTP' }, { value: 'grpc', label: 'gRPC' }] },
+          uuid, vlessEnc(['xray']),
+        ],
+      },
+      {
+        id: 'vless-mkcp', label: 'mKCP（UDP）', psm: 'xhttp', engines: ['xray'], defaultEngine: 'xray',
+        fixedFor: { xray: { mode: 'mkcp' } }, noMount443: true,
+        fields: [
+          { key: 'kcp_seed', label: 'mKCP 混淆种子', type: 'text', placeholder: '留空自动生成' },
+          uuid,
+          { key: 'vless_enc', label: 'VLESS Encryption（后量子加密）', type: 'select', default: '',
+            help: 'mKCP 不套 TLS，而 Xray v26.7.7 起的客户端拒绝向公网地址发送未加密的 VLESS，所以默认开启（X25519）。选「不开启」只有旧版客户端能连。',
+            options: [{ value: '', label: 'X25519（默认）' }, { value: 'mlkem768', label: 'ML-KEM-768' }, { value: 'none', label: '不开启（仅旧版客户端）' }] },
         ],
       },
     ],
@@ -266,15 +297,38 @@ export function trafficTag(n: { engine: string; psm_protocol: string; name: stri
   return n.engine === 'standalone' ? n.psm_protocol : n.name
 }
 
+/** PSM's protocol name for this variant on this engine. */
+export function psmOf(v: Variant, engine: Engine): string {
+  return v.psmFor?.[engine] ?? v.psm
+}
+
 export function findVariant(protocolId: string, variantId: string): Variant | undefined {
   return PROTOCOLS.find((p) => p.id === protocolId)?.variants.find((v) => v.id === variantId)
 }
 
+/**
+ * The variant a node stored before 0.10.2 has now. VLESS followed each core's
+ * name for it: Xray's XHTTP protocol (every transport, the REALITY layer and
+ * mKCP) and sing-box / mihomo's TLS (TCP, which is Vision, and the rest).
+ * Only the panel's record moves; what PSM is sent stays the same.
+ */
+export function currentVariant(protocol: string, variant: string, engine: string, params: Record<string, unknown>): string {
+  if (protocol !== 'vless') return variant
+  if (variant === 'vless-tls' && engine !== 'xray' && String(params.transport || 'tcp') === 'tcp') return 'vless-vision'
+  if (variant === 'vless-xhttp') {
+    const mode = String(params.mode || 'xhttp')
+    return mode === 'reality-layer' ? 'vless-reality-layer' : mode === 'mkcp' ? 'vless-mkcp' : 'vless-tls'
+  }
+  return variant
+}
+
 /** The fields shown for this variant, engine and the values entered so far. */
 export function activeFields(v: Variant, engine: Engine, values: Record<string, unknown>): Field[] {
-  return v.fields.filter((f) =>
-    (!f.engines || f.engines.includes(engine)) &&
-    (!f.when || Object.entries(f.when).every(([k, allowed]) => allowed.includes(String(values[k] ?? v.fields.find((x) => x.key === k)?.default ?? '')))))
+  const forEngine = (f: Field) => !f.engines || f.engines.includes(engine)
+  // a key can be two fields, one per engine (each with its own options and default)
+  const fallback = (k: string) => v.fields.find((x) => x.key === k && forEngine(x))?.default
+  return v.fields.filter((f) => forEngine(f) &&
+    (!f.when || Object.entries(f.when).every(([k, allowed]) => allowed.includes(String(values[k] ?? fallback(k) ?? '')))))
 }
 
 export interface NodeInput {
@@ -310,6 +364,10 @@ const FRONTED: Partial<Record<Engine, string[]>> = {
 export function canMount443(engine: Engine, psmProtocol: string): boolean {
   return (FRONTED[engine] ?? []).includes(psmProtocol)
 }
+/** Whether a node of this variant on this engine can share the public 443. */
+export function variantCanMount443(v: Variant, engine: Engine): boolean {
+  return !v.noMount443 && canMount443(engine, psmOf(v, engine))
+}
 
 // never starting with "-": on the server the name is an argument to psm, and
 // "--show-secrets" would be read as an option
@@ -336,7 +394,8 @@ export function validateNode(n: NodeInput):
   // bounded: 1e308 GB is finite, but not once it is counted in bytes
   if (n.traffic_limit_gb !== undefined && !(Number.isFinite(n.traffic_limit_gb) && n.traffic_limit_gb >= 0 && n.traffic_limit_gb <= 1_000_000))
     errors.push('流量限制：0-1000000 GB')
-  if (n.mount_443 && !canMount443(n.engine, v.psm))
+  const psm = psmOf(v, n.engine)
+  if (n.mount_443 && !variantCanMount443(v, n.engine))
     errors.push(`${v.label} 用 ${ENGINE_LABELS[n.engine] ?? n.engine} 运行时不能挂到 443 复用`)
 
   const params = n.params ?? {}
@@ -356,15 +415,11 @@ export function validateNode(n: NodeInput):
     const on = val === true || val === 'true'
     data[f.key] = f.type === 'number' || f.numeric ? Number(val) : f.type === 'bool' ? (f.jsonBool ? on : on ? 1 : 0) : val
   }
+  Object.assign(data, v.fixedFor?.[n.engine])
   // a custom exit scope is the geosite list itself (PSM's exit_sites takes names)
   if (data.exit_sites === 'custom') data.exit_sites = data.exit_geosite
   delete data.exit_geosite
-  if (v.psm === 'snell' && !(SNELL_VERSIONS[n.engine] ?? []).includes(String(data.version)))
+  if (psm === 'snell' && !(SNELL_VERSIONS[n.engine] ?? []).includes(String(data.version)))
     errors.push(`Snell v${data.version} 不能用 ${ENGINE_LABELS[n.engine]} 运行`)
-  if (v.id === 'vless-tls') {
-    const t = String(data.transport)
-    if (t === 'httpupgrade' && n.engine !== 'sing-box') errors.push('HTTPUpgrade 只有 sing-box 支持')
-    if (t === 'xhttp' && n.engine !== 'mihomo') errors.push('XHTTP 只有 mihomo 支持')
-  }
-  return errors.length ? { ok: false, errors } : { ok: true, engine: n.engine, psmProtocol: v.psm, data }
+  return errors.length ? { ok: false, errors } : { ok: true, engine: n.engine, psmProtocol: psm, data }
 }

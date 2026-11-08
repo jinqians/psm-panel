@@ -23,6 +23,17 @@ const formats = [
   { id: 'loon', label: 'Loon', help: 'Loon；没有 TUIC、Snell' },
 ]
 const urlFor = (s: Subscription, f: string) => (f ? `${s.url}?format=${f}` : s.url)
+const otherFormats = formats.filter((f) => f.id).map((f) => f.label.split(' / ')[0]).join('、')
+// One address is all most clients need (the 通用 one picks their format), so a
+// subscription shows that and opens the others on demand: seven rows each
+// filled the page once there were a few subscriptions (proxy-stack #10).
+const open = ref(new Set<number>())
+function toggleFormats(id: number) {
+  const next = new Set(open.value)
+  if (!next.delete(id)) next.add(id)
+  open.value = next
+}
+const customCount = (s: Subscription) => Object.keys(s.templates).length
 /** the token in a subscription's URL: what is masked on the page */
 const tokenOf = (s: Subscription) => s.url.split('/sub/')[1] ?? ''
 const loaded = ref(false)
@@ -162,7 +173,7 @@ async function removeTemplate(t: Template) {
         <button class="btn small ghost danger" @click="remove(s)"><Icon name="trash" />删除</button>
       </div>
     </div>
-    <div v-for="f in formats" :key="f.id" class="sub-row">
+    <div v-for="f in formats.filter((x) => !x.id || open.has(s.id))" :key="f.id" class="sub-row">
       <div class="sub-format">
         <div><b>{{ f.label }}</b></div><div class="muted small">{{ f.help }}</div>
         <select v-if="f.id" class="select small" style="margin-top: 4px; max-width: 220px; padding: 4px 8px" :value="s.templates[f.id] ?? ''"
@@ -173,6 +184,10 @@ async function removeTemplate(t: Template) {
       </div>
       <SecretText :value="urlFor(s, f.id)" :secret="tokenOf(s)" :test="`sub-url-${f.id || 'auto'}`" copied="已复制订阅地址" />
     </div>
+    <button class="btn small ghost sub-more" type="button" :aria-expanded="open.has(s.id)" :data-test="`sub-more-${s.name}`" @click="toggleFormats(s.id)">
+      <span class="caret">{{ open.has(s.id) ? '▾' : '▸' }}</span>{{ open.has(s.id) ? '收起其他客户端格式' : `其他客户端格式：${otherFormats}` }}
+      <span v-if="customCount(s)" class="muted small">（{{ customCount(s) }} 种用了自己的模板）</span>
+    </button>
   </div>
   <div v-if="loaded && !subs.length" class="card empty">还没有订阅。</div>
 

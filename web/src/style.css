@@ -369,6 +369,8 @@ ul.errors { padding-left: 14px }
 .sub-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap }
 .sub-row { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--border) }
 .sub-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px }
+.sub-more { margin-top: 4px; max-width: 100%; white-space: normal; text-align: left }
+.sub-more .caret { display: inline-block; width: 1.1em; color: var(--faint) }
 @media (max-width: 760px) { .sub-row { grid-template-columns: minmax(0, 1fr) } }
 
 /* ── facts (key: value) ──────────────────────────────────────────────────── */

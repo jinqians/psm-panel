@@ -7,7 +7,7 @@
 // protocol, how it runs, the server and the name; a stored password shows as
 // •••••• and stays unless replaced.
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { PROTOCOLS, ENGINE_LABELS, activeFields, canMount443, validateNode, type Engine } from '@shared/protocols'
+import { PROTOCOLS, ENGINE_LABELS, activeFields, validateNode, variantCanMount443, type Engine } from '@shared/protocols'
 import { api, ApiError, errorText, type PanelNode, type Server } from '../api'
 import { toast } from '../ui'
 import InstallCommand from './InstallCommand.vue'
@@ -64,7 +64,7 @@ const fields = computed(() => (variant.value ? activeFields(variant.value, engin
 // the TLS handshake, and only when the node is made — PSM refuses to move a
 // node onto or off the shared 443 as an update, so this is fixed afterwards.
 const mount443 = ref(props.node?.mount_443 ?? false)
-const canMount = computed(() => !!variant.value && canMount443(engine.value, variant.value.psm))
+const canMount = computed(() => !!variant.value && variantCanMount443(variant.value, engine.value))
 
 function pickProtocol(id: string) {
   protocolId.value = id
@@ -77,6 +77,13 @@ watch(variantId, () => {
   engine.value = variant.value.defaultEngine
   for (const k of Object.keys(params)) delete params[k]
   for (const f of variant.value.fields) if (f.default !== undefined) params[f.key] = f.default
+})
+// another engine can offer other choices for the same setting (the transports
+// of TLS + 传输): one the new engine lacks goes back to its default
+watch(engine, () => {
+  if (!variant.value || editing.value) return
+  for (const f of activeFields(variant.value, engine.value, params))
+    if (f.type === 'select' && !f.options?.some((o) => o.value === String(params[f.key] ?? ''))) params[f.key] = f.default
 })
 
 function addLabel() {
