@@ -173,7 +173,10 @@ export function linkProxy(link: string | null): Proxy | null {
       }
       const path = q.get('path') || '/', svc = q.get('serviceName') ?? ''
       if (q.get('security') === 'reality') {
-        const r = { 'reality-opts': { 'public-key': q.get('pbk') ?? '', 'short-id': q.get('sid') ?? '' } }
+        // support-x25519mlkem768: what PSM puts in the links of Xray's REALITY nodes
+        // (an Xray from v26.9.8 on refuses mihomo's hello without it)
+        const r = { 'reality-opts': { 'public-key': q.get('pbk') ?? '', 'short-id': q.get('sid') ?? '',
+          ...(q.get('support-x25519mlkem768') === 'true' ? { 'support-x25519mlkem768': true } : {}) } }
         if (net === 'tcp') return { ...base, ...r, network: 'tcp' }
         if (net === 'grpc') return { ...base, ...r, network: 'grpc', 'grpc-opts': { 'grpc-service-name': svc } }
         if (net === 'xhttp') return { ...base, ...r, network: 'xhttp', 'xhttp-opts': { path, mode: q.get('mode') || 'auto' } }
@@ -209,8 +212,12 @@ export function linkProxy(link: string | null): Proxy | null {
 // server-cert-fingerprint (stash.wiki: skip-cert-verify is not needed then).
 const stashOk = (p: Proxy) => p.type !== 'anytls' && p.network !== 'xhttp'
 function stashProxy(p: Proxy): Proxy {
-  if (!pin(p)) return p
-  const out: Proxy = { ...p, 'skip-cert-verify': false, 'server-cert-fingerprint': pin(p) }
+  // mihomo's support-x25519mlkem768 is not in Stash's documented format: left out, as before it existed
+  const ro = p['reality-opts'] as Record<string, unknown> | undefined
+  const base: Proxy = ro && 'support-x25519mlkem768' in ro
+    ? { ...p, 'reality-opts': Object.fromEntries(Object.entries(ro).filter(([k]) => k !== 'support-x25519mlkem768')) } : p
+  if (!pin(base)) return base
+  const out: Proxy = { ...base, 'skip-cert-verify': false, 'server-cert-fingerprint': pin(base) }
   delete out.fingerprint
   return out
 }
