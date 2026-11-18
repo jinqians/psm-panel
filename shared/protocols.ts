@@ -349,6 +349,33 @@ export interface NodeInput {
    * and PSM refuses to move a node onto or off the shared 443 as an update.
    */
   mount_443?: boolean
+  /**
+   * The node's name in clients, as it is (Chinese, emoji …). Empty: the flag of
+   * its server's country and "<server>-<name>". The panel's own: changing it
+   * sends nothing to the server.
+   */
+  display_name?: string
+}
+
+/**
+ * What is wrong with a display name, or null: up to 64 characters, any
+ * language and emoji, but no = or , (a Surge, Quantumult X or Loon line would
+ * end there), no control characters, no space at either end — the rules of
+ * `psm node … --display-name`.
+ */
+export function displayNameProblem(s: unknown): string | null {
+  if (s === undefined || s === '') return null
+  if (typeof s !== 'string') return '显示名：要是文字'
+  if ([...s].length > 64) return '显示名：最多 64 个字'
+  if (/[=,\p{Cc}]/u.test(s)) return '显示名：不能含 = 、英文逗号或换行等控制字符'
+  if (s !== s.trim()) return '显示名：首尾不能有空格'
+  return null
+}
+
+/** A two-letter country code as its flag (two regional indicator symbols); '' when there is none. */
+export function flagOf(cc: string | null | undefined): string {
+  if (!cc || !/^[A-Za-z]{2}$/.test(cc) || /^xx$/i.test(cc)) return ''
+  return String.fromCodePoint(...[...cc.toUpperCase()].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65))
 }
 
 /**
@@ -387,6 +414,8 @@ export function validateNode(n: NodeInput):
   if (!v.engines.includes(n.engine)) errors.push(`${v.label} 不能用 ${ENGINE_LABELS[n.engine] ?? n.engine} 运行`)
   if (!NAME_RE.test(n.name ?? '')) errors.push('节点名称：1-48 位字母、数字、. _ -，以字母或数字开头')
   else if (RESERVED_NAMES.includes(n.name.toLowerCase())) errors.push(`节点名称：${n.name} 是保留名称（独立安装的流量统计用它），请换一个`)
+  const dnProblem = displayNameProblem(n.display_name)
+  if (dnProblem) errors.push(dnProblem)
   if (!HOST_RE.test(n.address ?? '')) errors.push('节点地址：填写域名或 IP')
   const portOk = (p: unknown) => Number.isInteger(p) && (p as number) >= 1 && (p as number) <= 65535
   if (!portOk(n.port)) errors.push('服务端口：1-65535')

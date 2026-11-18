@@ -140,10 +140,10 @@ export function singboxVia(o: Obj, via: Via): Obj {
   return out
 }
 
-/** The whole node through the relay, named for the subscription (server-name). */
-export function nodeVia(n: SubNode, via: Via, server: string, name: string): SubNode {
+/** The whole node through the relay, named for the subscription (the entry server's flag, server-name). */
+export function nodeVia(n: SubNode, via: Via, server: string, name: string, country?: string | null): SubNode {
   return {
-    server, name,
+    server, name, country,
     link: n.link ? linkVia(n.link, via) : null,
     outbound: n.outbound ? singboxVia(n.outbound, via) : null,
     clash: n.clash && typeof n.clash === 'object' ? clashVia(n.clash, via) : null,

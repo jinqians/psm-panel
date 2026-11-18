@@ -48,6 +48,8 @@ export type PanelNode = {
   last_error: string | null; created_at: string; has_link: boolean
   /** shares the public 443 by SNI; fixed when the node is created */
   mount_443: boolean
+  /** the name in clients; '' = the server's flag and "<server>-<name>" */
+  display_name: string
   traffic_used: number; traffic_paused: boolean; traffic_at: string | null; reset_day: number
   params?: Record<string, unknown>
 }

@@ -54,7 +54,7 @@ const page = ref(1)
 const shown = computed(() => {
   const needle = q.value.trim().toLowerCase()
   return nodes.value.filter((n) =>
-    (!needle || n.name.toLowerCase().includes(needle) || n.address.toLowerCase().includes(needle) ||
+    (!needle || n.name.toLowerCase().includes(needle) || n.display_name.toLowerCase().includes(needle) || n.address.toLowerCase().includes(needle) ||
       n.labels.some((l) => l.toLowerCase().includes(needle)) || String(n.public_port ?? n.port) === needle) &&
     (fServer.value === '' || n.server_id === fServer.value) &&
     (!fStatus.value || (fStatus.value === 'paused' ? n.traffic_paused : n.status === fStatus.value)) &&
@@ -150,7 +150,7 @@ const pct = (n: PanelNode) => (n.traffic_limit_gb > 0 ? Math.min(100, (n.traffic
         <tbody>
           <template v-for="n in rows" :key="n.id">
           <tr :data-test="`node-${n.name}`" :data-status="n.status">
-            <td><b>{{ n.name }}</b><span class="sub">#{{ n.id }}</span></td>
+            <td><b>{{ n.name }}</b><span class="sub">{{ n.display_name ? `${n.display_name} · ` : '' }}#{{ n.id }}</span></td>
             <td>
               <span class="status" :class="n.status" :title="n.last_error ?? ''"><span class="dot" />{{ NODE_STATUS[n.status] }}</span>
               <span v-if="n.traffic_paused" class="badge warn" title="超出流量上限，已暂停">超额暂停</span>

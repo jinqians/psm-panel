@@ -7,7 +7,7 @@
 // protocol, how it runs, the server and the name; a stored password shows as
 // •••••• and stays unless replaced.
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { PROTOCOLS, ENGINE_LABELS, activeFields, validateNode, variantCanMount443, type Engine } from '@shared/protocols'
+import { PROTOCOLS, ENGINE_LABELS, activeFields, flagOf, validateNode, variantCanMount443, type Engine } from '@shared/protocols'
 import { api, ApiError, errorText, type PanelNode, type Server } from '../api'
 import { toast } from '../ui'
 import InstallCommand from './InstallCommand.vue'
@@ -25,6 +25,7 @@ const form = reactive({
   server: (props.node?.server_id ?? (props.servers[0]?.id ?? 'new')) as string | number,   // a server id, or 'new'
   newServer: '',
   name: props.node?.name ?? '',
+  displayName: props.node?.display_name ?? '',
   address: props.node?.address ?? '',
   publicPort: (props.node?.public_port ?? props.node?.port ?? '') as string | number,
   port: (props.node?.port ?? '') as string | number,
@@ -53,6 +54,12 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+})
+// what clients show without a display name (the subscriptions' name for the node)
+const defaultName = computed(() => {
+  const s = props.servers.find((x) => x.id === form.server)
+  const server = s?.name ?? (form.newServer.trim().toLowerCase() || '服务器')
+  return [flagOf(s?.country), `${server}-${form.name.trim() || '名称'}`].filter(Boolean).join(' ')
 })
 const result = ref<null | { status: string; joined: boolean; install_command?: string; serverName: string; standalone: boolean }>(null)
 
@@ -142,7 +149,7 @@ async function submit() {
     // on the shared 443 the node listens on 127.0.0.1 and clients reach 443
     port: port as number, public_port: shared443 ? 443 : num(form.publicPort) ?? port,
     traffic_limit_gb: num(form.traffic) ?? 0, labels: form.labels, params: { ...params },
-    mount_443: shared443,
+    mount_443: shared443, display_name: form.displayName.trim(),
   }
   const v = validateNode(input)
   if (!v.ok) return (errors.value = v.errors)
@@ -151,12 +158,14 @@ async function submit() {
   busy.value = true
   try {
     if (editing.value) {
-      await api(`/api/nodes/${props.node!.id}`, {
+      const saved = await api<PanelNode>(`/api/nodes/${props.node!.id}`, {
         method: 'PATCH',
         body: JSON.stringify({ address: input.address, port: input.port, public_port: input.public_port,
-          traffic_limit_gb: input.traffic_limit_gb, reset_day: resetDay, labels: input.labels, params: input.params }),
+          traffic_limit_gb: input.traffic_limit_gb, reset_day: resetDay, labels: input.labels, params: input.params,
+          display_name: input.display_name }),
       })
-      toast(`已保存 ${props.node!.name}，正在下发到服务器`)
+      // only the display name changed: the panel keeps that, nothing goes to the server
+      toast(saved.status === 'queued' ? `已保存 ${props.node!.name}，正在下发到服务器` : `已保存 ${props.node!.name}`)
       emit('close')
       return
     }
@@ -251,6 +260,12 @@ const subtitle = computed(() => result.value ? '' : editing.value
         <div class="field">
           <label>节点名称</label>
           <input v-model="form.name" class="input" placeholder="请输入节点名称" data-test="name" :disabled="editing">
+        </div>
+
+        <div class="field">
+          <label>显示名（可选）</label>
+          <input v-model="form.displayName" class="input" :placeholder="defaultName" data-test="display-name">
+          <div class="help">客户端里看到的名字，可用中文和 emoji，例如「🇭🇰 香港 01」；不填就是 {{ defaultName }}。只存在面板里，改它不会重新下发节点。</div>
         </div>
 
         <div class="row2">

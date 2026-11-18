@@ -1,15 +1,21 @@
 // Subscriptions: the running nodes of every server behind one URL, in the
 // format the client wants — a base64 list of share links (v2rayN, Shadowrocket,
 // Hiddify …), or a whole client profile made from a template: Clash / mihomo,
-// Stash, sing-box, Surge, Quantumult X or Loon (templates.ts). Node names
-// become "<server>-<node>" so nodes of the same name on different servers
-// stay apart.
+// Stash, sing-box, Surge, Quantumult X or Loon (templates.ts). A node is
+// named "🇭🇰 <server>-<node>" — the flag of its server's country, and the
+// server so nodes of the same name on different servers stay apart — or by
+// the display name it was given, as it is.
 
+import { flagOf } from '../../shared/protocols'
 import { BUILTIN_TEMPLATES, linkProxy, renderTemplate, TEMPLATE_FORMATS, type TemplateFormat } from './templates'
 
 export type SubNode = {
   server: string
   name: string
+  /** the server's country (where its psm-agent syncs from), for the flag */
+  country?: string | null
+  /** the node's display name: when set, its whole name in clients */
+  display_name?: string | null
   link: string | null
   outbound: Record<string, unknown> | null
   /** the node as a ready mihomo proxy (psm node export --format clash) */
@@ -37,7 +43,21 @@ export function pickFormat(query: string | null | undefined, userAgent: string):
   return 'uri'
 }
 
-export const displayName = (n: SubNode) => `${n.server}-${n.name}`
+/** A node's name in clients: its display name, else "🇭🇰 <server>-<node>" (PSM names its own "🇭🇰 <node>"). */
+export const displayName = (n: SubNode) =>
+  n.display_name || [flagOf(n.country), `${n.server}-${n.name}`].filter(Boolean).join(' ')
+
+/** One name for two nodes is one proxy to Clash, and a sing-box profile that does not start: a later one gets a number. */
+export function uniqueNames(nodes: SubNode[]): SubNode[] {
+  const seen = new Set<string>()
+  return nodes.map((n) => {
+    const base = displayName(n)
+    let name = base
+    for (let k = 2; seen.has(name); k++) name = `${base} ${k}`
+    seen.add(name)
+    return name === base ? n : { ...n, display_name: name }
+  })
+}
 
 function b64(s: string): string {
   let bin = ''
@@ -53,6 +73,13 @@ function unb64(s: string): string {
 
 const isShareLink = (link: string) => /^[a-z][a-z0-9+.-]*:\/\//i.test(link)
 const isSurgeLine = (link: string) => / = [a-z0-9-]+, /i.test(link) && !isShareLink(link)
+
+/** A node's share link or Surge line under a name; anything else (a wg-quick file) as it is. */
+export function renamed(link: string, name: string): string {
+  if (isShareLink(link)) return renameLink(link, name)
+  if (!link.includes('\n') && isSurgeLine(link)) return `${name} = ${link.slice(link.indexOf(' = ') + 3)}`
+  return link
+}
 
 /** A share link with its display name set (vmess carries it inside its JSON). */
 export function renameLink(link: string, name: string): string {
@@ -106,6 +133,7 @@ export function providerYaml(nodes: SubNode[]): string {
  */
 export function buildSubscription(format: Format, nodes: SubNode[], selfUrl: string,
   opts: { name?: string; template?: string | null } = {}): { body: string; type: string; ext: string } {
+  nodes = uniqueNames(nodes)
   if (format === 'uri') return { body: b64(uriList(nodes).join('\n')), type: 'text/plain; charset=utf-8', ext: 'txt' }
   if (format === 'provider') return { body: providerYaml(nodes), type: 'text/yaml; charset=utf-8', ext: 'yaml' }
   const body = renderTemplate(format, opts.template ?? BUILTIN_TEMPLATES[format].body,

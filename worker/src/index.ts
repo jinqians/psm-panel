@@ -9,7 +9,7 @@ import {
   adminConfigured, clearFailures, clearedCookie, ipKey, passwordIgnored, passwordMatches, recordFailure, revokeSessions,
   sessionCookie, syncAdminPassword, tooManyFailures, validSession,
 } from './auth'
-import { buildSubscription, pickFormat, renameLink, type SubNode } from './subscription'
+import { buildSubscription, displayName, pickFormat, renamed, type SubNode } from './subscription'
 import { BUILTIN_TEMPLATES, FORMAT_LABELS, TEMPLATE_FORMATS, type TemplateFormat } from './templates'
 import { activeFields, currentVariant, findVariant, trafficTag, validateNode, type NodeInput } from '../../shared/protocols'
 import {
@@ -21,7 +21,7 @@ import { linkVia, nodeVia, type Via } from './relayed'
 // not exported: every export of a Worker's main module is taken for an entrypoint
 // Shown in 系统设置 as 面板版本; bump it whenever the panel gains something, so
 // that it answers "did my deploy take effect?" — the only marker a user has.
-const PANEL_VERSION = '0.10.2'
+const PANEL_VERSION = '0.10.3'
 
 // The psm-agent release this panel expects its servers to run: the 服务器 page
 // offers an upgrade to every joined server reporting anything else. Bump it
@@ -60,7 +60,7 @@ type NodeRow = {
   labels: string; params_enc: string; link_enc: string | null; outbound_enc: string | null; clash_enc: string | null
   status: string; last_error: string | null; created_at: string
   traffic_used: number; traffic_paused: number; traffic_at: string | null; reset_day: number
-  mount_443: number
+  mount_443: number; display_name: string
 }
 type RelayRow = {
   id: number; server_id: number; name: string; listen_port: number; remote_host: string; remote_port: number
@@ -251,6 +251,13 @@ async function nodeData(env: Env, n: NodeRow): Promise<Record<string, unknown>> 
   })
   if (!v.ok) throw new Error(`stored node ${n.id} no longer validates: ${v.errors.join('; ')}`)
   return v.data
+}
+
+/** What a display name already in use says, or null: two nodes of one name would be one proxy to Clash. */
+async function displayNameTaken(env: Env, name: string | undefined, id: number | null): Promise<string | null> {
+  if (!name) return null
+  const hit = await env.DB.prepare('SELECT 1 FROM nodes WHERE display_name = ? AND id != ?').bind(name, id ?? -1).first()
+  return hit ? `显示名：「${name}」已经是另一个节点的名字` : null
 }
 
 /** A node row for the list: nothing decrypted (a list of many nodes costs no AES), no link. */
@@ -604,6 +611,8 @@ app.post('/api/nodes', async (c) => {
   if (!v.ok) return c.json(fail('invalid', v.errors.join('；'), { errors: v.errors }), 400)
   const tooOld = psmTooOld(server, v.data)
   if (tooOld) return c.json(fail('psm_too_old', tooOld, { errors: [tooOld] }), 409)
+  const taken = await displayNameTaken(c.env, body.display_name, null)
+  if (taken) return c.json(fail('exists', taken, { errors: [taken] }), 409)
   const resetDay = body.reset_day ?? 1
   if (!Number.isInteger(resetDay) || resetDay < 1 || resetDay > 28) return c.json(fail('invalid', '流量重置日：1-28', { errors: ['流量重置日：1-28'] }), 400)
   // on the shared 443 clients reach 443: another public port would be dropped without a word
@@ -627,12 +636,12 @@ app.post('/api/nodes', async (c) => {
   let id: number
   try {
     const r = await c.env.DB.prepare(
-      `INSERT INTO nodes (server_id, protocol, variant, engine, psm_protocol, name, address, port, public_port, traffic_limit_gb, reset_day, labels, params_enc, status, mount_443)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      `INSERT INTO nodes (server_id, protocol, variant, engine, psm_protocol, name, address, port, public_port, traffic_limit_gb, reset_day, labels, params_enc, status, mount_443, display_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(server.id, body.protocol, body.variant, v.engine, v.psmProtocol, body.name, body.address, body.port,
         // on the shared 443 the node listens on 127.0.0.1 and clients reach 443
         mount443 ? 443 : body.public_port ?? null, body.traffic_limit_gb ?? 0, resetDay, JSON.stringify(cleanLabels(body.labels)),
-        await encrypt(c.env.TOKEN_KEY, JSON.stringify(params)), status, mount443 ? 1 : 0)
+        await encrypt(c.env.TOKEN_KEY, JSON.stringify(params)), status, mount443 ? 1 : 0, body.display_name ?? '')
       .run()
     id = Number(r.meta.last_row_id)
   } catch (e) {
@@ -676,6 +685,7 @@ app.patch('/api/nodes/:id', async (c) => {
     traffic_limit_gb: body.traffic_limit_gb ?? n.traffic_limit_gb,
     labels: body.labels ?? JSON.parse(n.labels),
     params: { ...stored, ...(body.params ?? {}) },
+    display_name: body.display_name ?? n.display_name,
   }
   for (const [k, val] of Object.entries(input.params!)) if (val === MASK) input.params![k] = stored[k]
   const v = validateNode(input)
@@ -687,14 +697,30 @@ app.patch('/api/nodes/:id', async (c) => {
   const variant = findVariant(n.protocol, n.variant)!
   const params = keptParams(activeFields(variant, v.engine, input.params!), input.params!, stored)
   const server = (await getServer(c.env, n.server_id))!
+  const dn = input.display_name ?? ''
+  const taken = await displayNameTaken(c.env, dn, n.id)
+  if (taken) return c.json(fail('exists', taken, { errors: [taken] }), 409)
+  // nothing but the display name changed: it is the panel's own, and the node
+  // is not sent to its server again (one that failed still is: saving retries it)
+  const same = input.address === n.address && input.port === n.port
+    && (input.public_port ?? input.port) === (n.public_port ?? n.port) && (input.traffic_limit_gb ?? 0) === n.traffic_limit_gb
+    && resetDay === n.reset_day && JSON.stringify(cleanLabels(input.labels)) === n.labels
+    && JSON.stringify(params) === JSON.stringify(stored)
+  if (same && n.status !== 'failed') {
+    if (dn !== n.display_name) {
+      await c.env.DB.prepare('UPDATE nodes SET display_name = ? WHERE id = ?').bind(dn, n.id).run()
+      await audit(c.env, 'node.update', `${server.name}/${n.name}`, `显示名：${dn || '（国旗 + 名称）'}`)
+    }
+    return c.json(await publicNode(c.env, (await getNode(c.env, n.id))!))
+  }
   const joined = !!server.agent_token_hash
   const onServer = n.status === 'applied'
   const status = joined && (onServer || n.status === 'failed') ? 'queued' : n.status
   await c.env.DB.prepare(
     `UPDATE nodes SET address = ?, port = ?, public_port = ?, traffic_limit_gb = ?, reset_day = ?, labels = ?, params_enc = ?,
-            status = ?, last_error = NULL WHERE id = ?`)
+            display_name = ?, status = ?, last_error = NULL WHERE id = ?`)
     .bind(input.address, input.port, input.public_port ?? null, input.traffic_limit_gb ?? 0, resetDay,
-      JSON.stringify(cleanLabels(input.labels)), await encrypt(c.env.TOKEN_KEY, JSON.stringify(params)), status, n.id).run()
+      JSON.stringify(cleanLabels(input.labels)), await encrypt(c.env.TOKEN_KEY, JSON.stringify(params)), dn, status, n.id).run()
   const updated = (await getNode(c.env, n.id))!
   if (status === 'queued') await queueApply(c.env, updated, v.data, onServer ? 'update' : 'add')
   await audit(c.env, 'node.update', `${server.name}/${n.name}`)
@@ -731,12 +757,16 @@ app.delete('/api/nodes/:id', async (c) => {
   return c.body(null, 204)
 })
 
-// The client link (or Surge line for Snell), as the agent exported it.
+// The client link (or Surge line for Snell) the agent exported, named as the
+// subscriptions name the node.
 app.get('/api/nodes/:id/link', async (c) => {
   const n = await getNode(c.env, c.req.param('id'))
   if (!n) return c.json(fail('not_found', 'no such node'), 404)
   if (!n.link_enc) return c.json(fail('no_link', 'the node has no link yet'), 409)
-  return c.json({ format: linkFormat(n), content: await decrypt(c.env.TOKEN_KEY, n.link_enc) })
+  const server = await getServer(c.env, n.server_id)
+  const link = await decrypt(c.env.TOKEN_KEY, n.link_enc)
+  const name = displayName({ server: server?.name ?? '', name: n.name, country: server?.country, display_name: n.display_name, link, outbound: null })
+  return c.json({ format: linkFormat(n), content: renamed(link, name) })
 })
 
 // ── traffic ──────────────────────────────────────────────────────────────────
@@ -1508,13 +1538,15 @@ app.get('/sub/:token', async (c) => {
   if (!s) return c.text('not found', 404)
   const labels = JSON.parse(s.labels) as string[]
   const { results } = await c.env.DB.prepare(
-    `SELECT n.id, n.name, n.labels, n.link_enc, n.outbound_enc, n.clash_enc, n.traffic_used, n.traffic_limit_gb, s.name AS server
+    `SELECT n.id, n.name, n.display_name, n.labels, n.link_enc, n.outbound_enc, n.clash_enc, n.traffic_used, n.traffic_limit_gb,
+            s.name AS server, s.country
        FROM nodes n JOIN servers s ON s.id = n.server_id
       WHERE n.status = 'applied' AND n.traffic_paused = 0 ORDER BY s.id, n.id`)
-    .all<{ id: number; name: string; labels: string; link_enc: string | null; outbound_enc: string | null; clash_enc: string | null; traffic_used: number; traffic_limit_gb: number; server: string }>()
+    .all<{ id: number; name: string; display_name: string; labels: string; link_enc: string | null; outbound_enc: string | null; clash_enc: string | null;
+           traffic_used: number; traffic_limit_gb: number; server: string; country: string | null }>()
   const chosen = results.filter((n) => !labels.length || (JSON.parse(n.labels) as string[]).some((l) => labels.includes(l)))
   const own: SubNode[] = await Promise.all(chosen.map(async (n) => ({
-    server: n.server, name: n.name,
+    server: n.server, name: n.name, country: n.country, display_name: n.display_name,
     link: n.link_enc ? await decrypt(c.env.TOKEN_KEY, n.link_enc) : null,
     outbound: n.outbound_enc ? JSON.parse(await decrypt(c.env.TOKEN_KEY, n.outbound_enc)) : null,
     clash: n.clash_enc ? JSON.parse(await decrypt(c.env.TOKEN_KEY, n.clash_enc)) : null,
@@ -1531,7 +1563,7 @@ app.get('/sub/:token', async (c) => {
       let name = r.name
       for (let k = 2; names.has(`${r.server}-${name}`); k++) name = `${r.name}-${k}`
       names.add(`${r.server}-${name}`)
-      nodes.push(nodeVia(n, r.via, r.server, name))
+      nodes.push(nodeVia(n, r.via, r.server, name, r.country))
     }
   }
   const url = new URL(c.req.url)
@@ -1559,15 +1591,15 @@ app.get('/sub/:token', async (c) => {
  * paused, asked to, and with an address for clients — the one set, else the
  * one the entry server's psm-agent last synced from.
  */
-async function publishedRelays(env: Env): Promise<{ node_id: number; name: string; server: string; via: Via }[]> {
+async function publishedRelays(env: Env): Promise<{ node_id: number; name: string; server: string; country: string | null; via: Via }[]> {
   const { results } = await env.DB.prepare(
-    `SELECT r.node_id, r.name, r.listen_port, r.entry_host, s.name AS server, s.last_ip
+    `SELECT r.node_id, r.name, r.listen_port, r.entry_host, s.name AS server, s.last_ip, s.country
        FROM relays r JOIN servers s ON s.id = r.server_id
       WHERE r.node_id IS NOT NULL AND r.in_sub = 1 AND r.paused = '' AND r.status = 'applied'
         AND (r.mode != 'tunnel' OR r.exit_status = 'applied') ORDER BY r.id`)
-    .all<{ node_id: number; name: string; listen_port: number; entry_host: string; server: string; last_ip: string | null }>()
+    .all<{ node_id: number; name: string; listen_port: number; entry_host: string; server: string; last_ip: string | null; country: string | null }>()
   return results.filter((r) => r.entry_host || r.last_ip)
-    .map((r) => ({ node_id: r.node_id, name: r.name, server: r.server, via: { host: r.entry_host || r.last_ip!, port: r.listen_port } }))
+    .map((r) => ({ node_id: r.node_id, name: r.name, server: r.server, country: r.country, via: { host: r.entry_host || r.last_ip!, port: r.listen_port } }))
 }
 
 // A relay's node as its clients reach it through the relay: the node's link
@@ -1582,9 +1614,9 @@ app.get('/api/relays/:id/link', async (c) => {
   if (!host) return c.json(fail('no_host', '入口服务器还没连过面板：在中转里填上入口地址'), 409)
   const link = linkVia(await decrypt(c.env.TOKEN_KEY, n.link_enc), { host, port: r.listen_port })
   if (!link) return c.json(fail('no_link', '这种链接改不了地址'), 409)
-  // named as the subscription names it (a Surge line or wg-quick file keeps its own)
-  const entry = (await getServer(c.env, r.server_id))?.name ?? ''
-  const content = /^[a-z][a-z0-9+.-]*:\/\//i.test(link) ? renameLink(link, `${entry}-${r.name}`) : link
+  // named as the subscription names it (a wg-quick file keeps its own)
+  const entry = await getServer(c.env, r.server_id)
+  const content = renamed(link, displayName({ server: entry?.name ?? '', name: r.name, country: entry?.country, link, outbound: null }))
   return c.json({ format: linkFormat(n), content, host, port: r.listen_port })
 })
 
